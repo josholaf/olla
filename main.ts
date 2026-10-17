@@ -1,6 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, TFile, requestUrl } from 'obsidian';
-import { createRoot, Root } from 'react-dom/client';
-import React from 'react';
+import { App, Plugin, PluginSettingTab, Setting, requestUrl, Notice, setIcon } from 'obsidian';
 
 // Types
 interface OllamaModel {
@@ -57,26 +55,24 @@ class OllamaClient {
     }
   }
 
-  async generate(response: { content: string; model: string; done: boolean; total_duration?: number; eval_count?: number }, stream: boolean = false): Promise<string> {
+  async generate(prompt: string, model: string): Promise<string> {
     try {
-      const requestBody = {
-        model: response.model,
-        prompt: response.content,
-        stream,
-      };
-
-      const fetchResponse = await requestUrl({
+      const response = await requestUrl({
         url: `${this.baseUrl}/api/generate`,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify({
+          model,
+          prompt,
+          stream: false,
+        }),
       });
 
-      if (fetchResponse.status !== 200) {
-        throw new Error(`Failed to generate: ${fetchResponse.status}`);
+      if (response.status !== 200) {
+        throw new Error(`Failed to generate: ${response.status}`);
       }
 
-      const data = fetchResponse.json as { response: string; done: boolean; total_duration?: number; eval_count?: number };
+      const data = response.json as { response: string; done: boolean };
       return data.response || '';
     } catch (error) {
       console.error('Error generating:', error);
@@ -118,126 +114,144 @@ class OllamaClient {
   }
 }
 
-// Chat Message Component
-const ChatMessageComponent: React.FC<{ message: ChatMessage }> = ({ message }) => {
-  const isUser = message.sender === 'user';
-  const messageClass = isUser ? 'olla-message-user' : 'olla-message-assistant';
+// Chat Panel View
+class ChatPanelView {
+  private containerEl: HTMLElement;
+  private plugin: OllaPlugin;
+  private messagesContainer: HTMLElement;
+  private inputEl: HTMLTextAreaElement;
+  private sendButton: HTMLButtonElement;
+  private modelSelector: HTMLSelectElement;
+  private statusEl: HTMLElement;
 
-  return (
-    <div className={`olla-message ${messageClass}`}>
-      <div className="olla-message-sender">{message.sender}</div>
-      <div className="olla-message-content" dangerouslySetInnerHTML={{ __html: message.content }} />
-      <div className="olla-message-time">{new Date(message.timestamp).toLocaleTimeString()}</div>
-    </div>
-  );
-};
-
-// Chat Panel Component
-class ChatPanelComponent extends React.Component<{
-  messages: ChatMessage[];
-  onSend: (content: string) => void;
-  isLoading: boolean;
-  selectedModel: string;
-  onModelChange: (model: string) => void;
-  models: OllamaModel[];
-  isConnected: boolean;
-}, {}> {
-  private inputRef: React.RefObject<HTMLTextAreaElement>;
-
-  constructor(props: any) {
-    super(props);
-    this.inputRef = React.createRef<HTMLTextAreaElement>();
+  constructor(containerEl: HTMLElement, plugin: OllaPlugin) {
+    this.containerEl = containerEl;
+    this.plugin = plugin;
+    this.buildUI();
   }
 
-  handleSend = () => {
-    const input = this.inputRef.current;
-    if (input && input.value.trim()) {
-      this.props.onSend(input.value.trim());
-      input.value = '';
-    }
-  };
+  buildUI() {
+    this.containerEl.empty();
+    this.containerEl.addClass('olla-chat-container');
 
-  handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Header
+    const header = this.containerEl.createDiv({ cls: 'olla-chat-header' });
+    header.createEl('h2', { text: 'Olla Chat' });
+    this.statusEl = header.createSpan({ cls: 'olla-status' });
+
+    // Model selector
+    const modelSelectorContainer = this.containerEl.createDiv({ cls: 'olla-model-selector' });
+    this.modelSelector = modelSelectorContainer.createEl('select', { cls: 'olla-model-dropdown' });
+
+    // Messages container
+    this.messagesContainer = this.containerEl.createDiv({ cls: 'olla-messages-container' });
+
+    // Input container
+    const inputContainer = this.containerEl.createDiv({ cls: 'olla-input-container' });
+    this.inputEl = inputContainer.createEl('textarea', { cls: 'olla-input' });
+    this.inputEl.placeholder = 'Type your message... (Enter to send, Shift+Enter for new line)';
+    this.inputEl.addEventListener('keydown', this.handleKeyDown.bind(this));
+
+    this.sendButton = inputContainer.createEl('button', { cls: 'olla-send-button' });
+    this.sendButton.textContent = 'Send';
+    this.sendButton.addEventListener('click', this.handleSend.bind(this));
+
+    this.refresh();
+  }
+
+  handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       this.handleSend();
     }
-  };
+  }
 
-  render() {
-    const { messages, isLoading, selectedModel, onModelChange, models, isConnected } = this.props;
+  handleSend() {
+    const content = this.inputEl.value.trim();
+    if (content) {
+      this.plugin.sendMessage(content);
+      this.inputEl.value = '';
+    }
+  }
 
-    return (
-      <div className="olla-chat-panel">
-        <div className="olla-chat-header">
-          <h2>Olla Chat</h2>
-          <div className="olla-status">
-            {isConnected ? (
-              <span className="olla-status-connected">Connected to Ollama</span>
-            ) : (
-              <span className="olla-status-disconnected">Disconnected</span>
-            )}
-          </div>
-        </div>
+  refresh() {
+    const { settings, isConnected, isLoading } = this.plugin;
 
-        <div className="olla-model-selector">
-          <select
-            value={selectedModel}
-            onChange={(e) => onModelChange(e.target.value)}
-            disabled={!isConnected || models.length === 0}
-            className="olla-model-dropdown"
-          >
-            {models.length === 0 ? (
-              <option value="">No models available</option>
-            ) : (
-              models.map((model) => (
-                <option key={model.name} value={model.name}>
-                  {model.name}
-                </option>
-              ))
-            )}
-          </select>
-        </div>
+    // Update status
+    this.statusEl.empty();
+    if (isConnected) {
+      this.statusEl.createSpan({ text: 'Connected to Ollama', cls: 'olla-status-connected' });
+    } else {
+      this.statusEl.createSpan({ text: 'Disconnected', cls: 'olla-status-disconnected' });
+    }
 
-        <div className="olla-messages-container">
-          {messages.length === 0 ? (
-            <div className="olla-welcome-message">
-              <p>Start a conversation with Ollama!</p>
-              <p>Select a model and type your message below.</p>
-            </div>
-          ) : (
-            messages.map((message) => (
-              <ChatMessageComponent key={message.id} message={message} />
-            ))
-          )}
-          {isLoading && (
-            <div className="olla-message olla-message-assistant">
-              <div className="olla-message-sender">assistant</div>
-              <div className="olla-message-content olla-typing-indicator">
-                <span></span><span></span><span></span>
-              </div>
-            </div>
-          )}
-        </div>
+    // Update model selector
+    this.modelSelector.empty();
+    if (settings.models.length === 0) {
+      const option = this.modelSelector.createEl('option');
+      option.text = 'No models available';
+      option.value = '';
+    } else {
+      settings.models.forEach((model) => {
+        const option = this.modelSelector.createEl('option');
+        option.text = model.name;
+        option.value = model.name;
+      });
+    }
+    this.modelSelector.value = settings.selectedModel;
+    this.modelSelector.disabled = !isConnected || settings.models.length === 0;
+    this.modelSelector.addEventListener('change', () => {
+      settings.selectedModel = this.modelSelector.value;
+      this.plugin.saveSettings();
+      this.refresh();
+    });
 
-        <div className="olla-input-container">
-          <textarea
-            ref={this.inputRef}
-            className="olla-input"
-            placeholder={isConnected ? "Type your message... (Enter to send, Shift+Enter for new line)" : "Ollama is not connected. Please start Ollama server."}
-            onKeyDown={this.handleKeyDown}
-            disabled={!isConnected || !selectedModel}
-          />
-          <button
-            className="olla-send-button"
-            onClick={this.handleSend}
-            disabled={!isConnected || !selectedModel || isLoading}
-          >
-            Send
-          </button>
-        </div>
-      </div>
-    );
+    // Update messages
+    this.messagesContainer.empty();
+    if (settings.chatHistory.length === 0) {
+      const welcome = this.messagesContainer.createDiv({ cls: 'olla-welcome-message' });
+      welcome.createEl('p', { text: 'Start a conversation with Ollama!' });
+      welcome.createEl('p', { text: 'Select a model and type your message below.' });
+    } else {
+      settings.chatHistory.forEach((msg) => this.renderMessage(msg));
+    }
+
+    // Add loading indicator
+    if (isLoading) {
+      const loadingDiv = this.messagesContainer.createDiv({ cls: 'olla-message olla-message-assistant' });
+      loadingDiv.createDiv({ text: 'assistant', cls: 'olla-message-sender' });
+      const contentDiv = loadingDiv.createDiv({ cls: 'olla-message-content olla-typing-indicator' });
+      contentDiv.createSpan();
+      contentDiv.createSpan();
+      contentDiv.createSpan();
+    }
+
+    // Update input state
+    this.inputEl.disabled = !isConnected || !settings.selectedModel;
+    this.sendButton.disabled = !isConnected || !settings.selectedModel || isLoading;
+
+    if (!isConnected) {
+      this.inputEl.placeholder = 'Ollama is not connected. Please start Ollama server.';
+    } else if (!settings.selectedModel) {
+      this.inputEl.placeholder = 'Please select a model first.';
+    } else {
+      this.inputEl.placeholder = 'Type your message... (Enter to send, Shift+Enter for new line)';
+    }
+  }
+
+  renderMessage(message: ChatMessage) {
+    const msgEl = this.messagesContainer.createDiv({
+      cls: `olla-message olla-message-${message.sender}`,
+    });
+    msgEl.createDiv({ text: message.sender, cls: 'olla-message-sender' });
+    const contentDiv = msgEl.createDiv({ cls: 'olla-message-content' });
+    contentDiv.innerHTML = message.content;
+    msgEl.createDiv({ text: new Date(message.timestamp).toLocaleTimeString(), cls: 'olla-message-time' });
+  }
+
+  addMessage(message: ChatMessage) {
+    this.renderMessage(message);
+    this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
   }
 }
 
@@ -263,6 +277,8 @@ class OllaSettingTab extends PluginSettingTab {
         text.onChange(async (value) => {
           this.plugin.settings.ollamaUrl = value;
           await this.plugin.saveSettings();
+          this.plugin.ollamaClient = new OllamaClient(value);
+          this.plugin.checkConnection();
           this.plugin.loadModels();
         });
       });
@@ -283,63 +299,44 @@ class OllaSettingTab extends PluginSettingTab {
     containerEl.createEl('h3', { text: 'Download New Model' });
     
     const downloadContainer = containerEl.createDiv({ cls: 'olla-download-container' });
-    new Setting(downloadContainer)
-      .setName('Model Name')
-      .setDesc('Enter the name of the model to download (e.g., llama2, mistral)')
-      .addText((text) => {
-        text.setPlaceholder('llama2');
-      });
+    
+    const modelNameInput = downloadContainer.createEl('input', { type: 'text', cls: 'olla-model-input' });
+    modelNameInput.placeholder = 'Enter model name (e.g., llama2, mistral)';
 
-    new Setting(downloadContainer)
-      .addButton((button) => {
-        button.setButtonText('Download');
-        button.onClick(async () => {
-          const input = downloadContainer.querySelector('input') as HTMLInputElement;
-          const modelName = input.value.trim();
-          if (modelName) {
-            await this.plugin.downloadModel(modelName);
-            input.value = '';
-          }
-        });
-      });
+    const downloadButton = downloadContainer.createEl('button', { cls: 'olla-download-button' });
+    downloadButton.textContent = 'Download';
+    downloadButton.addEventListener('click', async () => {
+      const modelName = modelNameInput.value.trim();
+      if (modelName) {
+        await this.plugin.downloadModel(modelName);
+        modelNameInput.value = '';
+        new Notice(`Model ${modelName} download started`);
+      }
+    });
   }
 }
 
 // Main Plugin
 class OllaPlugin extends Plugin {
   settings: OllaSettings;
-  private root: Root | null = null;
-  private containerEl: HTMLElement | null = null;
-  private ollamaClient: OllamaClient;
-  private isLoading: boolean = false;
-  private isConnected: boolean = false;
-
-  constructor(app: App, manifest: any) {
-    super(app, manifest);
-    this.ollamaClient = new OllamaClient(DEFAULT_SETTINGS.ollamaUrl);
-  }
+  ollamaClient: OllamaClient;
+  private chatPanel: ChatPanelView | null = null;
+  private leaf: any = null;
+  isLoading: boolean = false;
+  isConnected: boolean = false;
 
   async onload() {
     await this.loadSettings();
-    
-    // Create status bar item
+    this.ollamaClient = new OllamaClient(this.settings.ollamaUrl);
+
+    // Add status bar item
     this.addStatusBarItem().setText('Olla');
 
     // Add ribbon icon
-    this.addRibbonIcon('bot', 'Olla', () => {
+    const ribbonIcon = this.addRibbonIcon('bot', 'Olla', () => {
       this.toggleChatPanel();
     });
-
-    // Create and register the chat panel
-    this.register(() => {
-      if (this.root) {
-        this.root.unmount();
-        this.root = null;
-      }
-      if (this.containerEl) {
-        this.containerEl.empty();
-      }
-    });
+    setIcon(ribbonIcon, 'bot');
 
     // Add settings tab
     this.addSettingTab(new OllaSettingTab(this.app, this));
@@ -348,8 +345,8 @@ class OllaPlugin extends Plugin {
     this.checkConnection();
     this.loadModels();
 
-    // Create chat panel
-    this.createChatPanel();
+    // Inject CSS
+    this.injectCSS();
   }
 
   async loadSettings() {
@@ -358,7 +355,6 @@ class OllaPlugin extends Plugin {
       ...DEFAULT_SETTINGS,
       ...data,
     };
-    this.ollamaClient = new OllamaClient(this.settings.ollamaUrl);
   }
 
   async saveSettings() {
@@ -367,8 +363,8 @@ class OllaPlugin extends Plugin {
 
   async checkConnection() {
     this.isConnected = await this.ollamaClient.checkHealth();
-    if (this.containerEl) {
-      this.renderChatPanel();
+    if (this.chatPanel) {
+      this.chatPanel.refresh();
     }
   }
 
@@ -380,12 +376,11 @@ class OllaPlugin extends Plugin {
       // Set default model if none selected
       if (!this.settings.selectedModel && models.length > 0) {
         this.settings.selectedModel = models[0].name;
+        await this.saveSettings();
       }
       
-      await this.saveSettings();
-      
-      if (this.containerEl) {
-        this.renderChatPanel();
+      if (this.chatPanel) {
+        this.chatPanel.refresh();
       }
     } catch (error) {
       console.error('Error loading models:', error);
@@ -396,19 +391,20 @@ class OllaPlugin extends Plugin {
   async downloadModel(modelName: string) {
     try {
       this.isLoading = true;
-      if (this.containerEl) {
-        this.renderChatPanel();
+      if (this.chatPanel) {
+        this.chatPanel.refresh();
       }
 
       await this.ollamaClient.pullModel(modelName);
       await this.loadModels();
+      new Notice(`Model ${modelName} downloaded successfully`);
     } catch (error) {
       console.error('Error downloading model:', error);
       new Notice(`Failed to download model: ${error}`);
     } finally {
       this.isLoading = false;
-      if (this.containerEl) {
-        this.renderChatPanel();
+      if (this.chatPanel) {
+        this.chatPanel.refresh();
       }
     }
   }
@@ -427,17 +423,19 @@ class OllaPlugin extends Plugin {
     };
 
     this.settings.chatHistory.push(userMessage);
-    this.renderChatPanel();
+    await this.saveSettings();
+    
+    if (this.chatPanel) {
+      this.chatPanel.addMessage(userMessage);
+    }
 
     try {
       this.isLoading = true;
-      this.renderChatPanel();
+      if (this.chatPanel) {
+        this.chatPanel.refresh();
+      }
 
-      const response = await this.ollamaClient.generate({
-        content,
-        model: this.settings.selectedModel,
-        done: false,
-      });
+      const response = await this.ollamaClient.generate(content, this.settings.selectedModel);
 
       const assistantMessage: ChatMessage = {
         id: `msg-${Date.now() + 1}`,
@@ -448,6 +446,10 @@ class OllaPlugin extends Plugin {
 
       this.settings.chatHistory.push(assistantMessage);
       await this.saveSettings();
+      
+      if (this.chatPanel) {
+        this.chatPanel.addMessage(assistantMessage);
+      }
     } catch (error) {
       console.error('Error generating response:', error);
       const errorMessage: ChatMessage = {
@@ -457,67 +459,36 @@ class OllaPlugin extends Plugin {
         timestamp: Date.now(),
       };
       this.settings.chatHistory.push(errorMessage);
+      await this.saveSettings();
+      if (this.chatPanel) {
+        this.chatPanel.addMessage(errorMessage);
+      }
     } finally {
       this.isLoading = false;
-      this.renderChatPanel();
+      if (this.chatPanel) {
+        this.chatPanel.refresh();
+      }
     }
   }
 
   toggleChatPanel() {
-    if (this.containerEl) {
-      this.containerEl.empty();
-      this.containerEl = null;
-      this.root = null;
+    if (this.leaf) {
+      this.app.workspace.detachLeaf(this.leaf);
+      this.leaf = null;
+      this.chatPanel = null;
     } else {
       this.createChatPanel();
     }
   }
 
   createChatPanel() {
-    if (this.containerEl) return;
-
-    this.containerEl = this.app.workspace.getRightLeaf(false).getContainer();
-    this.containerEl.empty();
-    this.containerEl.addClass('olla-chat-container');
-
-    this.root = createRoot(this.containerEl);
-    this.renderChatPanel();
+    this.leaf = this.app.workspace.getRightLeaf(false);
+    this.chatPanel = new ChatPanelView(this.leaf.getContainer(), this);
   }
 
-  renderChatPanel() {
-    if (!this.containerEl || !this.root) return;
-
-    this.root.render(
-      <ChatPanelComponent
-        messages={this.settings.chatHistory}
-        onSend={this.sendMessage.bind(this)}
-        isLoading={this.isLoading}
-        selectedModel={this.settings.selectedModel}
-        onModelChange={(model) => {
-          this.settings.selectedModel = model;
-          this.saveSettings();
-          this.renderChatPanel();
-        }}
-        models={this.settings.models}
-        isConnected={this.isConnected}
-      />
-    );
-  }
-
-  async onunload() {
-    if (this.root) {
-      this.root.unmount();
-      this.root = null;
-    }
-    if (this.containerEl) {
-      this.containerEl.empty();
-    }
-  }
-}
-
-// CSS Styles
-const style = document.createElement('style');
-style.textContent = `
+  injectCSS() {
+    const style = document.createElement('style');
+    style.textContent = `
 .olla-chat-container {
   display: flex;
   flex-direction: column;
@@ -525,15 +496,6 @@ style.textContent = `
   width: 100%;
   background: var(--background-secondary);
   border-left: 1px solid var(--background-modifier-border);
-}
-
-.olla-chat-panel {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  width: 100%;
-  padding: 12px;
-  box-sizing: border-box;
 }
 
 .olla-chat-header {
@@ -767,7 +729,38 @@ style.textContent = `
   padding-top: 16px;
   border-top: 1px solid var(--background-modifier-border);
 }
+
+.olla-model-input {
+  width: 100%;
+  padding: 8px;
+  margin-bottom: 8px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 0.9em;
+}
+
+.olla-download-button {
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: none;
+  background: var(--interactive-accent);
+  color: white;
+  font-weight: bold;
+  cursor: pointer;
+}
 `;
-document.head.appendChild(style);
+    document.head.appendChild(style);
+  }
+
+  async onunload() {
+    if (this.leaf) {
+      this.app.workspace.detachLeaf(this.leaf);
+      this.leaf = null;
+    }
+    this.chatPanel = null;
+  }
+}
 
 export default OllaPlugin;
