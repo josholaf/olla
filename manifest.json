@@ -1,0 +1,12 @@
+{
+  "id": "olla",
+  "name": "Olla",
+  "version": "1.0.0",
+  "description": "Integrate Ollama into Obsidian for AI-powered chat directly in your vault.",
+  "author": "josholaf",
+  "authorUrl": "https://github.com/josholaf",
+  "isDesktopOnly": true,
+  "minAppVersion": "1.0.0",
+  "fundingUrl": "",
+  "homepageUrl": "https://github.com/josholaf/olla"
+}

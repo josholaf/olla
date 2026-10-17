@@ -1,0 +1,28 @@
+{
+  "name": "olla",
+  "version": "1.0.0",
+  "description": "Obsidian plugin that integrates Ollama for AI chat",
+  "main": "main.js",
+  "scripts": {
+    "dev": "npm run build:watch",
+    "build": "tsc",
+    "build:watch": "tsc -w",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "ollama",
+    "ai",
+    "chat"
+  ],
+  "author": "josholaf",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "obsidian": "latest",
+    "typescript": "^5.3.0"
+  }
+}
